@@ -1,0 +1,192 @@
+The following is the plan to get a Raspi 3 to generate a wifi heat map:
+
+===================================================================================================================
+
+Hardware:
+	- Raspberry Pi 3
+	- Wireless Dongle
+	- GPS Dongle
+
+Software:
+	- gpsd suite of tools
+	- kismet
+	- github repo (for heat map generation in python)
+
+Resouces:
+	- Wifi War Driving:					https://scotthelme.co.uk/wifi-wardriving/
+	- Wifi Insecurity Wifi Map:				https://scotthelme.co.uk/wifi-insecurity-wifi-map/
+	- Kismet Heatamp (Github):				https://github.com/bliksemlabs/kismet-heatmap
+	- Mapping Wifi Networks on Google Maps with Kismet:	https://piratefache.ch/mapping-wifi-networks-on-google-maps/
+	- Fixing PPS on Raspi:					https://forums.adafruit.com/viewtopic.php?f=50&t=70133&start=60#p359668
+	- Configuring GPIO for GPS:				https://spellfoundry.com/2016/05/29/configuring-gpio-serial-port-raspbian-jessie-including-pi-3/
+
+Steps:
+	1) Get the necessary data collection working:
+		a) Wireless AP information
+		b) GPS location information
+	2) Install Kismet
+	3) Get Kismet to collect both the AP information and the GPS location informaiton
+	4) Export the Kismet data in XML formate
+		a) Wifi AP information
+		b) GPS infomraiton
+	5) Feed data into github project
+	6) Generate heatmap
+	7) ?????
+	8) Profit!
+
+Important Notes:
+	- GPS is @ /dev/ttyAMA0
+	- eth0 is left to be an ethernet connection to allow local network connectivity
+
+===================================================================================================================
+
+Installations:
+	- apt-get update
+	- apt-get upgrade -y
+	- apt-get install -y screen gpsd libncurses5-dev libpcap-dev tcpdump libnl-dev gpsd-clients python-gps
+
+Configurations:
+	- sudo vi /etc/default/gpsd	[Configuring GPS module]
+		START_DAEMON="true"
+		GPSD_OPTIONS="-n"
+		DEVICES="/dev/ttyAMA0"
+		USBAUTO="true"
+		GPSD_SOCKET="/var/run/gpsd.sock"
+
+Software Set-up:
+	- wget https://www.kismetwireless.net/static/code/kismet-2016-07-R1.tar.xz
+	- tar -xvf kismet-2016-07-R1.tar.xz
+	- cd kismet-2016-07-R1/
+	- ./configure
+	- make dep
+	- make
+	- sudo make install
+
+Software Configuration:
+	- sudo vi /usr/local/etc/kismet.conf
+		ncsource=wlan1		[ Remove Comment and add interface ]
+		logtypes=gpsxml,netxml	[ Cut down the amount of logged information from kismet ]
+
+Test GPS:
+	- cgps
+		-> Not working.... need to check that the GPS information is working correctly
+	- sudo killall gpsd
+	- sudo gpsd /dev/ttyAMA0 -F /var/run/gspd.sock
+	- cgps -s
+
+Clone Python Library (for dissecting GPS packets):
+	- git clone https://github.com/Knio/pynmea2.git
+	- python setup.py build
+	- python setup.py install
+
+Setting up PPS on the Raspi	[NOT USEFUL FOR GETTING SYSTEM WORKING]
+	- sudo rpi-update
+	- sudo apt-get install libcap-dev libssl-dev pps-tools
+	- Add 'dtoverlay=pps-gpio,gpiopin=4' to the end of /boot/config.txt
+	- Add 'pps-gpio' to the end of /etc/modules
+	-> Reboot device
+	- Check that the '/dev/pps0' device exists
+		=> Got this working
+
+Build and Install NTP		[NOT SURE THAT THIS HELPED]
+	- cd /usr/src
+	- sudo mkdir ntp
+	- chown pi:pi ntp
+	- cd ntp
+	- wget http://www.eecis.udel.edu/~ntp/ntp_spool/ntp4/ntp-4.2/ntp-4.2.8p1.tar.gz
+	- tar -xvf ntp-4.2.8p1.tar.gz
+	- cd ntp-4.2.8p1
+	- ./configure --enable-all-clocks --enable-parse-clocks --disable-local-libopts --enable-step-slew --without-ntpsnmpd --enable-linuxcaps --prefix=/usr
+	- make -j5		<---- Got stuck here..... went no where
+	- sudo apt-get remove ntp
+	- sudo apt-get instapp ntpdate
+	- sudo make install
+
+Hail Marys:
+	- sudo systemctl status hciuart
+		-> Disable bluetooth use of UART interface
+	- sudo systemctl mask serial-getty@ttyAMA0.service
+		-> Ensure read access to the /dev/ttyAMA0 file
+		- Did not work....
+		-> Force it: chmod 660 /dev/ttyAMA0
+			- Still DOES NOT WORK!!! Get permission denied error
+	- Edit /boot/config.txt to change line			<------ Important step
+		- dtoverlay=pi3-miniuart-bt
+		=> THIS FUCKING WORKED!!!!
+	=> Command to begin running the GPS Daemon:
+		- sudo gpsd /dev/serial0 -F /var/run/gpsd.sock
+
+Back to Kismet!!:
+	- sudo kismet
+		-> Will create files in the current directory for the session that was run
+
+Use of github project for mapping:
+	- 
+	- 
+
+===================================================================================================================
+					GPS Data Interpretation
+Resource: https://www.gpsinformation.org/dale/nmea.htm
+
+The most important NMEA sentences include the GGA which provides the current Fix data, the RMC which provides the minimum gps sentences information, and the GSA which provides the Satellite status data.
+
+GGA	-	essential fix data which provide 3D location and accuracy data.
+
+Example:	$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
+
+Where:
+	GGA			Global Positioning System Fix Data
+	123519			Fix taken at 12:35:19 UTC
+	4807.038,N		Latitude 48 deg 07.038' N
+	01131.000,E		Longitude 11 deg 31.000' E
+	1			Fix quality:	0 = invalid
+						1 = GPS fix (SPS)
+						2 = DGPS fix
+						3 = PPS fix
+						4 = Real Time Kinematic
+						5 = Float RTK
+						6 = estimated (dead reckoning) (2.3 feature)
+						7 = Manual input mode
+						8 = Simulation mode
+	08			Number of satellites being tracked
+	0.9			Horizontal dilution of position
+	545.4,M			Altitude, Meters, above mean sea level
+	46.9,M			Height of geoid (mean sea level) above WGS84
+					ellipsoid
+	(empty field)		time in seconds since last DGPS update
+	(empty field)		DGPS station ID number
+	*47			The checksum data, always begins with *
+
+Note: If the height of geoid is missing then the altitude should be suspect.  Some non-standard implementations report altitude with respect to the ellipsoid rather than geoid altitude.  Some unites do not
+	report negative altitudes at all.  This is the only sentence that reports altitude.
+
+===================================================================================================================
+
+
+TODO: 
+[x] Create mapping between MAC address and the corresponding AP essid
+[ ] Set-up user GUI for using the heatmapping system
+	- [ ] Check that GPS module is active and has a lock
+		- Spot a $GPGGA entry from GPS module (e.g. /dev/ttyAMA0)
+		- Is the 2nd field (fix taken) empty?			\_____
+		- Is the 7th field (fix quality) 0 or empty?		/	Then lock is not acquired
+		- Ex: cat /dev/ttyAMA0 | grep GPGGA | cut -d',' -f2,7	<----- Outputs the fix taken time and fix quality
+			-> Could just test $(cat /dev/ttyAMA0 | grep GPGGA | cut -d',' -f7) for a valid fix
+		- [ ] Set a number of times that grep matches the GPGGA string to 1
+			-> This will make repeating this action much simpler
+			- NOTE: '-c1' is how the flag needs to be presented, because otherwise grep will interpret '1' as the pattern (e.g. grep -c 1 GGA) and GGA as the file
+				-> This does not work, it will count the number of times it matches; use '-m 1' INSTEAD
+	- [ ] Begin running capture
+		- What directory does the user want to capture the data?
+		- [x] Begin the kismet_server as a background processs
+	- [ ] Stop capture
+[x] Create script for automatically starting kismet collection
+	- [x] Ask what directory name (or information) will be used for collecting data
+	- [N] Begin running kismet within a tmux terminal
+		-> So that a user can check on the running of the application
+	- [x] Begin kismet_server as a background process
+		-> This works to collect netxml + gpsxml data
+[ ] Write script for configuring:
+	- [ ] GPIO pins on raspi
+	- [ ] GPS Module
+	- [ ] Kismet for netxml + gpsxml data collection
